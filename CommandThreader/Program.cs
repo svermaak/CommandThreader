@@ -1,14 +1,10 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
 class Program
 {
-    // A thread-safe collection to keep track of threads
-    private static readonly List<Thread> threads = new();
-
     static void Main(string[] args)
     {
         Console.WriteLine("Welcome to CommandThreader!");
@@ -29,18 +25,40 @@ class Program
         }
 
         string[] commands = File.ReadAllLines(filePath);
-        ThreadPool.SetMaxThreads(maxThreads, maxThreads);
 
         Console.WriteLine($"Starting to process {commands.Length} commands with up to {maxThreads} concurrent threads.");
 
+        var semaphore = new SemaphoreSlim(maxThreads);
+        var countdown = new CountdownEvent(commands.Length);
+
         foreach (string command in commands)
         {
-            if (string.IsNullOrWhiteSpace(command)) continue;
+            if (string.IsNullOrWhiteSpace(command))
+            {
+                countdown.Signal();
+                continue;
+            }
 
-            ThreadPool.QueueUserWorkItem(state => RunCommand(command));
+            semaphore.Wait(); // Wait for an available slot
+            ThreadPool.QueueUserWorkItem(state =>
+            {
+                try
+                {
+                    RunCommand(command);
+                }
+                finally
+                {
+                    semaphore.Release(); // Release the slot after the command completes
+                    countdown.Signal();  // Mark task as completed
+                }
+            });
         }
 
-        Console.WriteLine("Press any key to exit once all commands are processed...");
+        // Wait for all threads to complete
+        countdown.Wait();
+        semaphore.Dispose();
+
+        Console.WriteLine("All commands have been processed. Press any key to exit...");
         Console.ReadKey();
     }
 
@@ -48,11 +66,30 @@ class Program
     {
         try
         {
-            string[] parts = command.Split(' ', 2);
-            string exePath = parts[0];
-            string arguments = parts.Length > 1 ? parts[1] : string.Empty;
+            // Split command using | as the delimiter
+            string[] parts = command.Split('|');
+            if (parts.Length < 3)
+            {
+                Console.WriteLine($"Invalid command format: {command}");
+                return;
+            }
 
-            Console.WriteLine($"Executing: {command}");
+            string exePath = parts[0].Trim();
+            string arguments = parts[1].Trim();
+            string visibility = parts[2].Trim().ToLower();
+
+            // Validate executable path
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                Console.WriteLine($"Executable path is missing in: {command}");
+                return;
+            }
+
+            // Determine whether the application window should be visible
+            bool createNoWindow = visibility != "visible";
+
+            Console.WriteLine($"Executing: {exePath} {arguments} (Visible: {!createNoWindow})");
+
             Process process = new()
             {
                 StartInfo = new ProcessStartInfo
@@ -62,7 +99,7 @@ class Program
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = createNoWindow
                 }
             };
 
@@ -85,7 +122,8 @@ class Program
             process.Start();
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-            process.WaitForExit();
+            process.WaitForExit(); // Wait for the process to terminate
+            Console.WriteLine($"Process '{exePath}' completed with exit code {process.ExitCode}.");
         }
         catch (Exception ex)
         {
